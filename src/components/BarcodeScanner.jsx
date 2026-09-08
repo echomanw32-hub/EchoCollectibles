@@ -11,89 +11,97 @@ const READERS = [
   'codabar_reader'
 ]
 
-// Quagga fires onDetected many times per second while a barcode is in
-// frame. If nothing new comes in for this long, treat it as "lost" so the
-// UI doesn't keep showing a stale "Detected" pill after you move the camera.
-const DETECTION_TIMEOUT_MS = 1200
-
 export default function BarcodeScanner({ collectionName, onProcess, processing }) {
   const [mode, setMode] = useState('bulk') // 'single' | 'bulk'
   const [queue, setQueue] = useState([])
-  const [detectedCode, setDetectedCode] = useState(null)
+  const [status, setStatus] = useState('idle') // 'idle' | 'analyzing' | 'not-found'
   const [flash, setFlash] = useState(false)
   const [error, setError] = useState(null)
   const [cameraReady, setCameraReady] = useState(false)
+  const [manualCode, setManualCode] = useState('')
 
-  const viewportRef = useRef(null)
-  const detectedCodeRef = useRef(null)
-  const clearTimerRef = useRef(null)
+  const videoRef = useRef(null)
+  const streamRef = useRef(null)
 
   useEffect(() => {
     let cancelled = false
 
-    Quagga.init(
-      {
-        inputStream: {
-          type: 'LiveStream',
-          target: viewportRef.current,
-          constraints: {
-            facingMode: 'environment',
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          }
-        },
-        locator: { patchSize: 'medium', halfSample: true },
-        numOfWorkers: navigator.hardwareConcurrency ? Math.min(navigator.hardwareConcurrency, 4) : 2,
-        decoder: { readers: READERS },
-        locate: true
-      },
-      (err) => {
-        if (cancelled) return
-        if (err) {
-          setError('Camera unavailable: ' + err.message)
+    navigator.mediaDevices
+      .getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      })
+      .then((stream) => {
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop())
           return
         }
-        Quagga.start()
+        streamRef.current = stream
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream
+          videoRef.current.play().catch(() => {})
+        }
         setCameraReady(true)
-      }
-    )
-
-    function onDetected(result) {
-      const code = result?.codeResult?.code
-      if (!code) return
-      detectedCodeRef.current = code
-      setDetectedCode(code)
-
-      clearTimeout(clearTimerRef.current)
-      clearTimerRef.current = setTimeout(() => {
-        detectedCodeRef.current = null
-        setDetectedCode(null)
-      }, DETECTION_TIMEOUT_MS)
-    }
-
-    Quagga.onDetected(onDetected)
+      })
+      .catch((err) => setError('Camera unavailable: ' + err.message))
 
     return () => {
       cancelled = true
-      clearTimeout(clearTimerRef.current)
-      Quagga.offDetected(onDetected)
-      Quagga.stop()
+      streamRef.current?.getTracks().forEach((t) => t.stop())
     }
   }, [])
 
-  function capture() {
-    const code = detectedCodeRef.current
-    if (!code) return
-
+  function addCode(code) {
     if (mode === 'single') {
       setQueue([{ code, id: Date.now() }])
     } else {
       setQueue((prev) => [...prev, { code, id: Date.now() }])
     }
-
     setFlash(true)
     setTimeout(() => setFlash(false), 300)
     if (navigator.vibrate) navigator.vibrate(40)
+    setStatus('idle')
+  }
+
+  function captureFrame() {
+    const video = videoRef.current
+    if (!video || !video.videoWidth) return null
+    const canvas = document.createElement('canvas')
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
+    return canvas.toDataURL('image/jpeg', 0.92)
+  }
+
+  function capture() {
+    const dataUrl = captureFrame()
+    if (!dataUrl) return
+    setStatus('analyzing')
+
+    Quagga.decodeSingle(
+      {
+        src: dataUrl,
+        numOfWorkers: 0,
+        locate: true,
+        decoder: { readers: READERS }
+      },
+      (result) => {
+        const code = result?.codeResult?.code
+        if (code) {
+          addCode(code)
+        } else {
+          setStatus('not-found')
+        }
+      }
+    )
+  }
+
+  function submitManual(e) {
+    e.preventDefault()
+    const code = manualCode.trim()
+    if (!code) return
+    addCode(code)
+    setManualCode('')
   }
 
   function removeFromQueue(id) {
@@ -129,8 +137,8 @@ export default function BarcodeScanner({ collectionName, onProcess, processing }
         </div>
       </div>
 
-      <div className="relative rounded-xl2 overflow-hidden border border-charcoal-600 [&_video]:w-full [&_video]:h-full [&_video]:object-cover [&_canvas]:absolute [&_canvas]:inset-0 [&_canvas]:w-full [&_canvas]:h-full">
-        <div ref={viewportRef} className="relative w-full aspect-[4/3] bg-black" />
+      <div className="relative rounded-xl2 overflow-hidden border border-charcoal-600">
+        <video ref={videoRef} playsInline muted className="w-full aspect-[4/3] object-cover bg-black" />
 
         <div
           className={`pointer-events-none absolute inset-0 border-4 transition-opacity ${
@@ -141,17 +149,23 @@ export default function BarcodeScanner({ collectionName, onProcess, processing }
         <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between gap-3">
           <span
             className={`flex-1 truncate text-xs rounded-full px-3 py-2 ${
-              detectedCode
-                ? 'bg-mint-500/90 text-charcoal-900 font-medium'
+              status === 'analyzing'
+                ? 'bg-charcoal-900/80 text-mint-400'
+                : status === 'not-found'
+                ? 'bg-orange-500/80 text-charcoal-900 font-medium'
                 : 'bg-charcoal-900/80 text-neutral-400'
             }`}
           >
-            {detectedCode ? `Detected: ${detectedCode}` : 'Point camera at a barcode…'}
+            {status === 'analyzing'
+              ? 'Analyzing…'
+              : status === 'not-found'
+              ? 'No barcode found — reposition and try again, or enter manually below'
+              : 'Line up the barcode, then tap capture'}
           </span>
 
           <button
             onClick={capture}
-            disabled={!detectedCode}
+            disabled={!cameraReady || status === 'analyzing'}
             className="shrink-0 h-14 w-14 rounded-full bg-white disabled:bg-neutral-500/40 border-4 border-charcoal-900/60 shadow-lg active:scale-90 transition"
             aria-label="Capture barcode"
           />
@@ -168,6 +182,23 @@ export default function BarcodeScanner({ collectionName, onProcess, processing }
           </p>
         )}
       </div>
+
+      <form onSubmit={submitManual} className="flex gap-2">
+        <input
+          value={manualCode}
+          onChange={(e) => setManualCode(e.target.value)}
+          inputMode="numeric"
+          placeholder="Or type the barcode number"
+          className="flex-1 bg-charcoal-800 border border-charcoal-600 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 outline-none focus:border-mint-500"
+        />
+        <button
+          type="submit"
+          disabled={!manualCode.trim()}
+          className="px-4 rounded-lg bg-charcoal-800 border border-charcoal-600 text-mint-400 text-sm font-medium disabled:text-neutral-600"
+        >
+          Add
+        </button>
+      </form>
 
       {mode === 'bulk' && queue.length > 0 && (
         <div className="rounded-xl2 bg-charcoal-800 border border-charcoal-600 p-3">
