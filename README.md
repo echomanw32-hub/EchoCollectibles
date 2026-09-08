@@ -13,12 +13,18 @@ Scan collectible barcodes, auto-fetch eBay sold-listing prices and images, and t
 ## Deploying to Vercel
 
 - Push to GitHub (GitHub Desktop works fine) and import the repo in Vercel.
-- Add the same `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` env vars in the Vercel project settings.
+- Add `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` and `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` in the Vercel project's env var settings.
 - The `/api/price/bulk` folder is auto-detected as a serverless function — no extra config needed.
 
-## Notes on the eBay price lookup
+## eBay price lookup
 
-`api/price/bulk.js` scrapes eBay's public completed-listings RSS feed and regex-parses the title/description for a thumbnail image and price. This is unofficial and eBay's markup can change without notice — if prices stop populating, that's the first place to check. For anything production-grade, eBay's official Browse API (OAuth-based) would be a sturdier long-term replacement.
+`api/price/bulk.js` uses eBay's official **Browse API** (server-to-server OAuth via client credentials — no user eBay login involved). It searches by GTIN (your barcode) first, falling back to a keyword search if a listing has no GTIN attached.
+
+You'll need a free eBay Developer account (https://developer.ebay.com) — create a production keyset, enable the Buy Browse API, and set `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` as **server-side** env vars (not `VITE_`-prefixed — they must never ship to the browser).
+
+**Known limitation, not a bug**: eBay's public API only exposes *active* listing prices. Sold/completed-listing price history lives in eBay's Marketplace Insights API, which requires a special restricted-access grant eBay doesn't hand out to normal developer accounts. So "market value" here means the average current asking price across matching active listings, not a historical sale average — a reasonable proxy, but worth knowing if a number looks off.
+
+The previous version scraped eBay's search-results RSS feed (`_rss=1`). That output has effectively been dead for years — eBay's site now returns a normal HTML page (or a bot-check page) instead of XML for that param, and the "completed/sold" filter requires a logged-in session a server-side fetch doesn't have. That's why nothing was ever found; it wasn't a parsing issue, the data path itself no longer works.
 
 ## Adding to a home screen
 
@@ -30,7 +36,7 @@ Scan collectible barcodes, auto-fetch eBay sold-listing prices and images, and t
 - **"Can't create a collection" / nothing happens when I tap Create**: this was a real bug, not a config issue. `React.StrictMode` (in `main.jsx`) double-invokes effects in dev, so the app's init effect was calling `signInAnonymously()` twice on load, creating two separate anonymous users in a race. React's `userId` state could end up out of sync with whichever session the Supabase client actually had active, so the insert's `user_id` didn't match `auth.uid()` in the request's JWT — the RLS policy silently rejected it. Fixed two ways: the init effect now only runs once (guarded with a ref), and every write now pulls the current user via `supabase.auth.getUser()` at the moment of the request instead of trusting React state. Any remaining save failures now show a red banner with the actual error instead of only logging to console.
 - **Camera opens but nothing scans / shutter button seems permanently disabled**: this was a real logic bug, not a tuning issue. The button was `disabled={!detectedCode}` — it could only unlock *after* the live decoder already succeeded on its own, so if live detection never fired, there was no way to trigger a capture at all. It's rebuilt now: the camera preview is a plain `<video>` feed (no live decode loop running), the shutter is always enabled once the camera starts, and pressing it grabs the current frame and runs a single still-image decode (`Quagga.decodeSingle`) — which is both more reliable than real-time decoding and gives you clear success/"not found, try again" feedback either way. There's also a manual number-entry field under the camera as a guaranteed fallback, so a bad decode never fully blocks you from adding an item.
 - Swapped the decoding engine from `html5-qrcode` (ZXing-js, weak at 1D barcodes) to **Quagga2** (`@ericblade/quagga2`), which is purpose-built for UPC/EAN-style barcodes and works on iOS Safari (unlike the native `BarcodeDetector` API, which Safari doesn't support at all).
-- **Scanning is now manual by design**: point the camera at a barcode, wait for the "Detected: …" pill, then tap the white shutter button to capture it. **Single** mode replaces the queue with just that one scan; **Bulk** mode lets you tap the shutter repeatedly to keep adding items before hitting "Process & Fetch All."
+- **Scanning is manual by design**: point the camera at a barcode and tap the white shutter button — it captures the current frame and decodes it on the spot. **Single** mode replaces the queue with just that one scan; **Bulk** mode lets you tap the shutter repeatedly to keep adding items before hitting "Process & Fetch All." There's also a manual text-entry field if a photo won't decode.
 
 ## Icons
 

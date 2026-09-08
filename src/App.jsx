@@ -84,6 +84,31 @@ export default function App() {
     setSelectedCollectionId(data.id)
   }
 
+  async function updateCollection(id, { name, color, icon }) {
+    const { data, error } = await supabase
+      .from('collections')
+      .update({ name, color, icon })
+      .eq('id', id)
+      .select()
+      .single()
+    if (error) {
+      console.error(error)
+      throw new Error(error.message)
+    }
+    setCollections((prev) => prev.map((c) => (c.id === id ? data : c)))
+  }
+
+  async function deleteCollection(id) {
+    const { error } = await supabase.from('collections').delete().eq('id', id)
+    if (error) {
+      console.error(error)
+      throw new Error(error.message)
+    }
+    setCollections((prev) => prev.filter((c) => c.id !== id))
+    setItems((prev) => prev.filter((it) => it.collection_id !== id))
+    setSelectedCollectionId((prev) => (prev === id ? null : prev))
+  }
+
   async function processBarcodes(barcodes) {
     setProcessing(true)
     try {
@@ -176,6 +201,8 @@ export default function App() {
           <CollectionManager
             collections={collectionsWithCounts}
             onCreate={createCollection}
+            onUpdate={updateCollection}
+            onDelete={deleteCollection}
             onSelect={setSelectedCollectionId}
             selectedId={selectedCollectionId}
           />
