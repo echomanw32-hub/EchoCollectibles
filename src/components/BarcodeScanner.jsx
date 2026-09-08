@@ -200,9 +200,11 @@ export default function BarcodeScanner({ collectionName, onProcess, processing }
         </button>
       </form>
 
-      {mode === 'bulk' && queue.length > 0 && (
+      {queue.length > 0 && (
         <div className="rounded-xl2 bg-charcoal-800 border border-charcoal-600 p-3">
-          <p className="text-xs text-neutral-400 mb-2">{queue.length} captured</p>
+          <p className="text-xs text-neutral-400 mb-2">
+            {queue.length} captured{mode === 'single' ? ' (single mode replaces on next capture)' : ''}
+          </p>
           <div className="flex flex-wrap gap-2">
             {queue.map((q) => (
               <span

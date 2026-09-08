@@ -7,8 +7,12 @@ Scan collectible barcodes, auto-fetch eBay sold-listing prices and images, and t
 1. `npm install`
 2. Create a Supabase project, then run `supabase/schema.sql` in the SQL editor.
 3. In Supabase Auth settings, enable **Anonymous sign-ins** (the app signs users in anonymously so there's no login screen — swap in email/password or magic-link auth later if you want accounts).
-4. Copy `.env.example` to `.env` and fill in your Supabase URL + anon key.
+4. Copy `.env.example` to `.env` and fill in your Supabase URL + anon key (and eBay credentials — see below).
 5. `npm run dev` to run locally.
+
+### Testing the camera on your phone
+
+Browsers block camera access (`getUserMedia`) on any origin that isn't HTTPS or `localhost`. If you open the dev server from your phone via your computer's LAN IP (e.g. `http://192.168.x.x:5173`), the camera will silently fail — not a bug, just how browsers treat insecure origins. `npm run dev` now serves over HTTPS with a self-signed dev certificate (via `@vitejs/plugin-basic-ssl`) specifically so this works: run `npm run dev`, then open the printed `https://<your-LAN-IP>:5173` URL on your phone. Your browser will show a "connection not private" warning on first visit — that's expected for a self-signed cert, tap through it. (Deployed on Vercel, this is a non-issue — it's HTTPS by default.)
 
 ## Deploying to Vercel
 
@@ -36,7 +40,8 @@ The previous version scraped eBay's search-results RSS feed (`_rss=1`). That out
 - **"Can't create a collection" / nothing happens when I tap Create**: this was a real bug, not a config issue. `React.StrictMode` (in `main.jsx`) double-invokes effects in dev, so the app's init effect was calling `signInAnonymously()` twice on load, creating two separate anonymous users in a race. React's `userId` state could end up out of sync with whichever session the Supabase client actually had active, so the insert's `user_id` didn't match `auth.uid()` in the request's JWT — the RLS policy silently rejected it. Fixed two ways: the init effect now only runs once (guarded with a ref), and every write now pulls the current user via `supabase.auth.getUser()` at the moment of the request instead of trusting React state. Any remaining save failures now show a red banner with the actual error instead of only logging to console.
 - **Camera opens but nothing scans / shutter button seems permanently disabled**: this was a real logic bug, not a tuning issue. The button was `disabled={!detectedCode}` — it could only unlock *after* the live decoder already succeeded on its own, so if live detection never fired, there was no way to trigger a capture at all. It's rebuilt now: the camera preview is a plain `<video>` feed (no live decode loop running), the shutter is always enabled once the camera starts, and pressing it grabs the current frame and runs a single still-image decode (`Quagga.decodeSingle`) — which is both more reliable than real-time decoding and gives you clear success/"not found, try again" feedback either way. There's also a manual number-entry field under the camera as a guaranteed fallback, so a bad decode never fully blocks you from adding an item.
 - Swapped the decoding engine from `html5-qrcode` (ZXing-js, weak at 1D barcodes) to **Quagga2** (`@ericblade/quagga2`), which is purpose-built for UPC/EAN-style barcodes and works on iOS Safari (unlike the native `BarcodeDetector` API, which Safari doesn't support at all).
-- **Scanning is manual by design**: point the camera at a barcode and tap the white shutter button — it captures the current frame and decodes it on the spot. **Single** mode replaces the queue with just that one scan; **Bulk** mode lets you tap the shutter repeatedly to keep adding items before hitting "Process & Fetch All." There's also a manual text-entry field if a photo won't decode.
+- **Typing a barcode manually and tapping Add seemed to do nothing**: this was a real UI bug — the "captured items" confirmation list only rendered in Bulk mode. In Single mode, adding a code updated the queue internally (the button at the bottom did change to "Process & Fetch All (1)"), but there was no visible confirmation near the input, so it looked like nothing happened. Fixed: the captured list now always shows, in both modes.
+- **Camera scanning seems completely broken (not just missing barcodes)**: check how you're accessing the app. Browsers block camera access entirely on non-HTTPS, non-`localhost` origins — if you're testing on a phone via your computer's LAN IP over plain `http://`, the camera will never turn on, silently. See "Testing the camera on your phone" above.
 
 ## Icons
 
