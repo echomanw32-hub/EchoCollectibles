@@ -1,29 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode'
+import Quagga from '@ericblade/quagga2'
 
-const SCANNER_ID = 'ec-scanner-region'
-
-const BARCODE_FORMATS = [
-  Html5QrcodeSupportedFormats.EAN_13,
-  Html5QrcodeSupportedFormats.EAN_8,
-  Html5QrcodeSupportedFormats.UPC_A,
-  Html5QrcodeSupportedFormats.UPC_E,
-  Html5QrcodeSupportedFormats.CODE_128,
-  Html5QrcodeSupportedFormats.CODE_39,
-  Html5QrcodeSupportedFormats.CODE_93,
-  Html5QrcodeSupportedFormats.ITF,
-  Html5QrcodeSupportedFormats.CODABAR,
-  Html5QrcodeSupportedFormats.QR_CODE
+const READERS = [
+  'ean_reader',
+  'ean_8_reader',
+  'upc_reader',
+  'upc_e_reader',
+  'code_128_reader',
+  'code_39_reader',
+  'codabar_reader'
 ]
 
-// Dynamic box sized relative to the actual camera feed — a fixed pixel box
-// can end up bigger than the real video stream on some phones, which
-// silently stops html5-qrcode from decoding anything even though the
-// preview keeps showing.
-function qrboxFunction(viewfinderWidth, viewfinderHeight) {
-  const size = Math.floor(Math.min(viewfinderWidth, viewfinderHeight) * 0.7)
-  return { width: size, height: Math.floor(size * 0.55) }
-}
+// Quagga fires onDetected many times per second while a barcode is in
+// frame. If nothing new comes in for this long, treat it as "lost" so the
+// UI doesn't keep showing a stale "Detected" pill after you move the camera.
+const DETECTION_TIMEOUT_MS = 1200
 
 export default function BarcodeScanner({ collectionName, onProcess, processing }) {
   const [mode, setMode] = useState('bulk') // 'single' | 'bulk'
@@ -32,34 +23,61 @@ export default function BarcodeScanner({ collectionName, onProcess, processing }
   const [flash, setFlash] = useState(false)
   const [error, setError] = useState(null)
   const [cameraReady, setCameraReady] = useState(false)
-  const scannerRef = useRef(null)
+
+  const viewportRef = useRef(null)
   const detectedCodeRef = useRef(null)
+  const clearTimerRef = useRef(null)
 
   useEffect(() => {
-    const scanner = new Html5Qrcode(SCANNER_ID, {
-      formatsToSupport: BARCODE_FORMATS,
-      verbose: false
-    })
-    scannerRef.current = scanner
+    let cancelled = false
 
-    scanner
-      .start(
-        { facingMode: 'environment' },
-        { fps: 10, qrbox: qrboxFunction, aspectRatio: 1.3333 },
-        (decodedText) => {
-          detectedCodeRef.current = decodedText
-          setDetectedCode(decodedText)
+    Quagga.init(
+      {
+        inputStream: {
+          type: 'LiveStream',
+          target: viewportRef.current,
+          constraints: {
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
         },
-        () => {} // per-frame "not found" noise — expected, ignore
-      )
-      .then(() => setCameraReady(true))
-      .catch((err) => setError('Camera unavailable: ' + err))
+        locator: { patchSize: 'medium', halfSample: true },
+        numOfWorkers: navigator.hardwareConcurrency ? Math.min(navigator.hardwareConcurrency, 4) : 2,
+        decoder: { readers: READERS },
+        locate: true
+      },
+      (err) => {
+        if (cancelled) return
+        if (err) {
+          setError('Camera unavailable: ' + err.message)
+          return
+        }
+        Quagga.start()
+        setCameraReady(true)
+      }
+    )
+
+    function onDetected(result) {
+      const code = result?.codeResult?.code
+      if (!code) return
+      detectedCodeRef.current = code
+      setDetectedCode(code)
+
+      clearTimeout(clearTimerRef.current)
+      clearTimerRef.current = setTimeout(() => {
+        detectedCodeRef.current = null
+        setDetectedCode(null)
+      }, DETECTION_TIMEOUT_MS)
+    }
+
+    Quagga.onDetected(onDetected)
 
     return () => {
-      scanner
-        .stop()
-        .catch(() => {})
-        .finally(() => scanner.clear())
+      cancelled = true
+      clearTimeout(clearTimerRef.current)
+      Quagga.offDetected(onDetected)
+      Quagga.stop()
     }
   }, [])
 
@@ -111,8 +129,8 @@ export default function BarcodeScanner({ collectionName, onProcess, processing }
         </div>
       </div>
 
-      <div className="relative rounded-xl2 overflow-hidden border border-charcoal-600">
-        <div id={SCANNER_ID} className="w-full aspect-[4/3] bg-black" />
+      <div className="relative rounded-xl2 overflow-hidden border border-charcoal-600 [&_video]:w-full [&_video]:h-full [&_video]:object-cover [&_canvas]:absolute [&_canvas]:inset-0 [&_canvas]:w-full [&_canvas]:h-full">
+        <div ref={viewportRef} className="relative w-full aspect-[4/3] bg-black" />
 
         <div
           className={`pointer-events-none absolute inset-0 border-4 transition-opacity ${
