@@ -8,15 +8,25 @@ export default function CollectionManager({ collections, onCreate, onSelect, sel
   const [name, setName] = useState('')
   const [color, setColor] = useState(SWATCHES[0])
   const [icon, setIcon] = useState(ICONS[0])
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState(null)
 
-  function submit(e) {
+  async function submit(e) {
     e.preventDefault()
-    if (!name.trim()) return
-    onCreate({ name: name.trim(), color, icon })
-    setName('')
-    setColor(SWATCHES[0])
-    setIcon(ICONS[0])
-    setCreating(false)
+    if (!name.trim() || submitting) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      await onCreate({ name: name.trim(), color, icon })
+      setName('')
+      setColor(SWATCHES[0])
+      setIcon(ICONS[0])
+      setCreating(false)
+    } catch (err) {
+      setError(err.message || 'Could not create collection.')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -76,11 +86,18 @@ export default function CollectionManager({ collections, onCreate, onSelect, sel
             </div>
           </div>
 
+          {error && (
+            <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
+              {error}
+            </p>
+          )}
+
           <button
             type="submit"
-            className="w-full bg-mint-500 text-charcoal-900 font-semibold rounded-lg py-2.5 active:scale-95 transition"
+            disabled={submitting}
+            className="w-full bg-mint-500 disabled:bg-charcoal-600 disabled:text-neutral-500 text-charcoal-900 font-semibold rounded-lg py-2.5 active:scale-95 transition"
           >
-            Create collection
+            {submitting ? 'Creating…' : 'Create collection'}
           </button>
         </form>
       )}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from './lib/supabaseClient'
 import CollectionManager from './components/CollectionManager'
 import BarcodeScanner from './components/BarcodeScanner'
@@ -21,8 +21,13 @@ export default function App() {
   const [processing, setProcessing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [userId, setUserId] = useState(null)
+  const [authReady, setAuthReady] = useState(false)
+  const [banner, setBanner] = useState(null)
+  const didInit = useRef(false)
 
   useEffect(() => {
+    if (didInit.current) return
+    didInit.current = true
     init()
   }, [])
 
@@ -36,11 +41,16 @@ export default function App() {
       const { data, error } = await supabase.auth.signInAnonymously()
       if (error) {
         console.error('Auth error', error)
+        setBanner(
+          `Sign-in failed: ${error.message}. In your Supabase dashboard, go to Authentication → Providers and enable "Allow anonymous sign-ins", then reload.`
+        )
+        setAuthReady(true)
         return
       }
       uid = data.user.id
     }
     setUserId(uid)
+    setAuthReady(true)
     await loadData(uid)
   }
 
@@ -55,12 +65,21 @@ export default function App() {
   }
 
   async function createCollection({ name, color, icon }) {
+    const {
+      data: { user }
+    } = await supabase.auth.getUser()
+    if (!user) {
+      throw new Error('Not signed in yet — wait a moment and try again.')
+    }
     const { data, error } = await supabase
       .from('collections')
-      .insert({ user_id: userId, name, color, icon })
+      .insert({ user_id: user.id, name, color, icon })
       .select()
       .single()
-    if (error) return console.error(error)
+    if (error) {
+      console.error(error)
+      throw new Error(error.message)
+    }
     setCollections((prev) => [...prev, data])
     setSelectedCollectionId(data.id)
   }
@@ -94,8 +113,16 @@ export default function App() {
 
   async function saveReviewed(drafts) {
     setSaving(true)
+    const {
+      data: { user }
+    } = await supabase.auth.getUser()
+    if (!user) {
+      setSaving(false)
+      setBanner('Not signed in yet — wait a moment and try again.')
+      return
+    }
     const rows = drafts.map((d) => ({
-      user_id: userId,
+      user_id: user.id,
       collection_id: selectedCollectionId,
       barcode: d.barcode,
       title: d.title,
@@ -104,7 +131,11 @@ export default function App() {
     }))
     const { data, error } = await supabase.from('items').insert(rows).select()
     setSaving(false)
-    if (error) return console.error(error)
+    if (error) {
+      console.error(error)
+      setBanner(`Save failed: ${error.message}`)
+      return
+    }
     setItems((prev) => [...(data ?? []), ...prev])
     setPendingReview(null)
     setTab('dashboard')
@@ -123,6 +154,12 @@ export default function App() {
           Echo<span className="text-mint-400">Collectibles</span>
         </h1>
       </header>
+
+      {banner && (
+        <div className="mx-5 mb-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs px-3 py-2">
+          {banner}
+        </div>
+      )}
 
       <main className="flex-1 overflow-y-auto px-5 pb-28">
         {pendingReview ? (
