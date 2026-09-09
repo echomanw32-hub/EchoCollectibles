@@ -11,6 +11,79 @@ const READERS = [
   'codabar_reader'
 ]
 
+// The alignment guide box, as fractions of the video container. Kept in one
+// place so the visual overlay and the crop math stay in sync.
+const GUIDE = { xFrac: 0.06, yFrac: 0.36, wFrac: 0.88, hFrac: 0.26 }
+
+// 1D barcodes need enough pixels per bar to decode reliably. A barcode that
+// only occupies a small part of a full-frame photo gets too blurry once
+// Quagga processes it. Cropping to just the guide box and upscaling that
+// crop gives the decoder far more effective resolution on the actual bars.
+const UPSCALED_WIDTH = 1400
+
+function decodeOnce(src, locatorOptions) {
+  return new Promise((resolve) => {
+    Quagga.decodeSingle(
+      {
+        src,
+        numOfWorkers: 0,
+        locate: true,
+        locator: locatorOptions,
+        decoder: { readers: READERS }
+      },
+      (result) => resolve(result?.codeResult?.code ?? null)
+    )
+  })
+}
+
+// Maps the on-screen guide box (defined in container CSS fractions) into
+// the video's native pixel coordinates, accounting for object-fit: cover
+// scaling/cropping between the displayed element and the underlying stream.
+function guideRectInVideoPixels(video, container) {
+  const videoW = video.videoWidth
+  const videoH = video.videoHeight
+  const rect = container.getBoundingClientRect()
+  const containerW = rect.width
+  const containerH = rect.height
+
+  const scale = Math.max(containerW / videoW, containerH / videoH)
+  const displayedW = videoW * scale
+  const displayedH = videoH * scale
+  const offsetX = (displayedW - containerW) / 2
+  const offsetY = (displayedH - containerH) / 2
+
+  const leftDisplayed = GUIDE.xFrac * containerW + offsetX
+  const topDisplayed = GUIDE.yFrac * containerH + offsetY
+  const widthDisplayed = GUIDE.wFrac * containerW
+  const heightDisplayed = GUIDE.hFrac * containerH
+
+  return {
+    x: leftDisplayed / scale,
+    y: topDisplayed / scale,
+    width: widthDisplayed / scale,
+    height: heightDisplayed / scale
+  }
+}
+
+function cropAndUpscale(video, rect) {
+  const scaleUp = UPSCALED_WIDTH / rect.width
+  const canvas = document.createElement('canvas')
+  canvas.width = UPSCALED_WIDTH
+  canvas.height = Math.round(rect.height * scaleUp)
+  canvas
+    .getContext('2d')
+    .drawImage(video, rect.x, rect.y, rect.width, rect.height, 0, 0, canvas.width, canvas.height)
+  return canvas.toDataURL('image/jpeg', 0.95)
+}
+
+function fullFrame(video) {
+  const canvas = document.createElement('canvas')
+  canvas.width = video.videoWidth
+  canvas.height = video.videoHeight
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
+  return canvas.toDataURL('image/jpeg', 0.92)
+}
+
 export default function BarcodeScanner({ collectionName, onProcess, processing }) {
   const [mode, setMode] = useState('bulk') // 'single' | 'bulk'
   const [queue, setQueue] = useState([])
@@ -21,6 +94,7 @@ export default function BarcodeScanner({ collectionName, onProcess, processing }
   const [manualCode, setManualCode] = useState('')
 
   const videoRef = useRef(null)
+  const containerRef = useRef(null)
   const streamRef = useRef(null)
 
   useEffect(() => {
@@ -28,7 +102,7 @@ export default function BarcodeScanner({ collectionName, onProcess, processing }
 
     navigator.mediaDevices
       .getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
       })
       .then((stream) => {
@@ -63,37 +137,30 @@ export default function BarcodeScanner({ collectionName, onProcess, processing }
     setStatus('idle')
   }
 
-  function captureFrame() {
+  async function capture() {
     const video = videoRef.current
-    if (!video || !video.videoWidth) return null
-    const canvas = document.createElement('canvas')
-    canvas.width = video.videoWidth
-    canvas.height = video.videoHeight
-    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
-    return canvas.toDataURL('image/jpeg', 0.92)
-  }
+    const container = containerRef.current
+    if (!video || !video.videoWidth || !container) return
 
-  function capture() {
-    const dataUrl = captureFrame()
-    if (!dataUrl) return
     setStatus('analyzing')
 
-    Quagga.decodeSingle(
-      {
-        src: dataUrl,
-        numOfWorkers: 0,
-        locate: true,
-        decoder: { readers: READERS }
-      },
-      (result) => {
-        const code = result?.codeResult?.code
-        if (code) {
-          addCode(code)
-        } else {
-          setStatus('not-found')
-        }
-      }
-    )
+    const rect = guideRectInVideoPixels(video, container)
+    const croppedSrc = cropAndUpscale(video, rect)
+
+    // Try the cropped, upscaled guide-box region first — this is the shot
+    // most likely to decode. Fall back to the full frame in case the
+    // barcode wasn't well aligned in the guide but is still readable
+    // elsewhere in frame.
+    let code = await decodeOnce(croppedSrc, { patchSize: 'large', halfSample: false })
+    if (!code) {
+      code = await decodeOnce(fullFrame(video), { patchSize: 'medium', halfSample: true })
+    }
+
+    if (code) {
+      addCode(code)
+    } else {
+      setStatus('not-found')
+    }
   }
 
   function submitManual(e) {
@@ -137,8 +204,20 @@ export default function BarcodeScanner({ collectionName, onProcess, processing }
         </div>
       </div>
 
-      <div className="relative rounded-xl2 overflow-hidden border border-charcoal-600">
+      <div ref={containerRef} className="relative rounded-xl2 overflow-hidden border border-charcoal-600">
         <video ref={videoRef} playsInline muted className="w-full aspect-[4/3] object-cover bg-black" />
+
+        {/* Alignment guide — keep the barcode inside this box. Its position
+            here (in %) mirrors the GUIDE fractions used for cropping. */}
+        <div
+          className="pointer-events-none absolute border-2 border-dashed border-mint-400/80 rounded-lg"
+          style={{
+            left: `${GUIDE.xFrac * 100}%`,
+            top: `${GUIDE.yFrac * 100}%`,
+            width: `${GUIDE.wFrac * 100}%`,
+            height: `${GUIDE.hFrac * 100}%`
+          }}
+        />
 
         <div
           className={`pointer-events-none absolute inset-0 border-4 transition-opacity ${
@@ -159,8 +238,8 @@ export default function BarcodeScanner({ collectionName, onProcess, processing }
             {status === 'analyzing'
               ? 'Analyzing…'
               : status === 'not-found'
-              ? 'No barcode found — reposition and try again, or enter manually below'
-              : 'Line up the barcode, then tap capture'}
+              ? 'No barcode found — fill the box, hold steady, try again'
+              : 'Fill the box with the barcode, then tap capture'}
           </span>
 
           <button
